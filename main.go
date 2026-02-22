@@ -22,16 +22,24 @@ func main() {
 	trackPath := mustEnv("TRACK_PATH")
 	stateFile := "last_response.json"
 
+	notify := func(msg string) {
+		if err := sendTelegram(tkn, chatID, msg); err != nil {
+			log.Printf("telegram notify failed: %v", err)
+		}
+	}
+	fatal := func(context string, err error) {
+		notify(fmt.Sprintf("%s: %v", context, err))
+		log.Fatalf("%s: %v", context, err)
+	}
+
 	headers, err := parseHeaders(os.Getenv("REQUEST_HEADERS"))
 	if err != nil {
-		sendTelegram(tkn, chatID, fmt.Sprintf("Bad headers config: %v", err))
-		log.Fatalf("bad headers config: %v", err)
+		fatal("bad headers config", err)
 	}
 
 	body, err := executeFetch(endpoint, headers)
 	if err != nil {
-		sendTelegram(tkn, chatID, "Failed to fetch latest response")
-		log.Fatalf("Failed to fetch latest response: %v", err)
+		fatal("fetch failed", err)
 	}
 
 	newSet := extractSet(body, trackPath)
@@ -42,12 +50,12 @@ func main() {
 	oldSet, err := loadSet(stateFile)
 	if err != nil {
 		log.Println("First run, saving baseline.")
-		sendTelegram(tkn, chatID, "First run, saving baseline.")
+		notify("First run, saving baseline.")
 	} else {
 		added, removed := diffSets(oldSet, newSet)
 		if len(added) > 0 || len(removed) > 0 {
 			msg := formatChanges(endpoint, added, removed)
-			sendTelegram(tkn, chatID, msg)
+			notify(msg)
 			log.Println("Change detected, notification sent.")
 		} else {
 			log.Println("No change.")
@@ -55,7 +63,7 @@ func main() {
 	}
 
 	if err := saveSet(stateFile, newSet); err != nil {
-		log.Fatalf("write failed: %v\n", err)
+		log.Fatalf("save state: %v", err)
 	}
 }
 
@@ -170,24 +178,34 @@ func executeFetch(endpoint string, headers map[string]string) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("fetch failed: %v\n", err)
-		return nil, err
+		return nil, fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	newData, err := io.ReadAll(resp.Body)
-	return newData, err
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
-func sendTelegram(tkn, chatID, message string) {
+func sendTelegram(tkn, chatID, message string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tkn)
 	resp, err := http.PostForm(apiURL, url.Values{
 		"chat_id": {chatID},
 		"text":    {message},
 	})
 	if err != nil {
-		log.Printf("telegram send failed: %v\n", err)
-		return
+		return fmt.Errorf("telegram request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("telegram HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
