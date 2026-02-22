@@ -1,0 +1,52 @@
+name: Poll endpoint
+
+on:
+#  schedule:
+#    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hash source files
+        id: hash
+        run: echo "go_hash=${{ hashFiles('main.go', 'go.mod', 'go.sum') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached binary
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: poller
+          key: poller-${{ steps.hash.outputs.go_hash }}
+
+      - name: Build (only if source changed)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Compile binary
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: go build -o poller main.go
+
+      - name: Run poller
+        env:
+          TARGET_ENDPOINT: ${{ secrets.TARGET_ENDPOINT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TRACK_PATH: ${{ secrets.TRACK_PATH }}
+          REQUEST_HEADERS: ${{ secrets.REQUEST_HEADERS }}
+        run: ./poller
+
+      - name: Commit updated response
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_response.json
+          git diff --cached --quiet || git commit -m "update last_response.json" && git push
