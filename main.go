@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/tidwall/gjson"
 )
 
@@ -19,7 +21,7 @@ func main() {
 	endpoint := mustEnv("TARGET_ENDPOINT")
 	tkn := mustEnv("TELEGRAM_BOT_TOKEN")
 	chatID := mustEnv("TELEGRAM_CHAT_ID")
-	trackPath := mustEnv("TRACK_PATH")
+	trackPath := mustEnv("TRACK_PATH") // gjson path for JSON, CSS selector for HTML
 	stateFile := "last_response.json"
 
 	notify := func(msg string) {
@@ -37,12 +39,23 @@ func main() {
 		fatal("bad headers config", err)
 	}
 
-	body, err := executeFetch(endpoint, headers)
+	body, contentType, err := executeFetch(endpoint, headers)
 	if err != nil {
 		fatal("fetch failed", err)
 	}
 
-	newSet := extractSet(body, trackPath)
+	format := detectFormat(contentType)
+
+	var newSet map[string]bool
+	switch format {
+	case "html":
+		newSet, err = extractSetHTML(body, trackPath)
+		if err != nil {
+			fatal("html extraction failed", err)
+		}
+	default:
+		newSet = extractSetJSON(body, trackPath)
+	}
 	if len(newSet) == 0 {
 		log.Printf("warning: TRACK_PATH %q matched 0 values", trackPath)
 	}
@@ -67,13 +80,65 @@ func main() {
 	}
 }
 
-func extractSet(data []byte, path string) map[string]bool {
+func extractSetJSON(data []byte, path string) map[string]bool {
 	result := gjson.GetBytes(data, path)
 	set := map[string]bool{}
 	for _, v := range result.Array() {
 		set[v.String()] = true
 	}
 	return set
+}
+
+// extractSetHTML parses the response body as HTML, finds all elements matching
+// the CSS selector, and collects a unique set of values from them.
+//
+// TRACK_PATH can optionally end with @attr to extract an attribute value
+// instead of text content. For example:
+//
+//	".title a"                     → text content of each matched element
+//	"div[class*=showDate-]@class"  → class attribute of each matched element
+//
+// Empty values and duplicates are silently skipped.
+func extractSetHTML(data []byte, path string) (map[string]bool, error) {
+	selector, attr := parseHTMLPath(path)
+
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("parse HTML: %w", err)
+	}
+
+	set := map[string]bool{}
+	doc.Find(selector).Each(func(_ int, s *goquery.Selection) {
+		var val string
+		if attr != "" {
+			val, _ = s.Attr(attr)
+		} else {
+			val = s.Text()
+		}
+		if val = strings.TrimSpace(val); val != "" {
+			set[val] = true
+		}
+	})
+	return set, nil
+}
+
+// parseHTMLPath splits a TRACK_PATH like "div.foo@class" into the CSS
+// selector ("div.foo") and the attribute name ("class"). If there is no
+// @attr suffix, attr is empty and the full path is the selector.
+func parseHTMLPath(path string) (selector, attr string) {
+	if i := strings.LastIndex(path, "@"); i != -1 {
+		return path[:i], path[i+1:]
+	}
+	return path, ""
+}
+
+// detectFormat determines whether to parse the response as JSON or HTML
+// based on the Content-Type header returned by the server.
+func detectFormat(contentType string) string {
+	if strings.Contains(contentType, "text/html") {
+		return "html"
+	}
+	return "json"
 }
 
 func loadSet(path string) (map[string]bool, error) {
@@ -164,12 +229,12 @@ func parseHeaders(raw string) (map[string]string, error) {
 	return headers, nil
 }
 
-func executeFetch(endpoint string, headers map[string]string) ([]byte, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
+func executeFetch(endpoint string, headers map[string]string) (body []byte, contentType string, err error) {
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, "", fmt.Errorf("build request: %w", err)
 	}
 
 	for k, v := range headers {
@@ -178,18 +243,18 @@ func executeFetch(endpoint string, headers map[string]string) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request: %w", err)
+		return nil, "", fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return nil, "", fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
-	return body, nil
+	return body, resp.Header.Get("Content-Type"), nil
 }
 
 func sendTelegram(tkn, chatID, message string) error {
