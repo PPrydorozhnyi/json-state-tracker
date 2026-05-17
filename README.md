@@ -108,6 +108,24 @@ export TARGET_ENDPOINT="https://kontramarka.ua/uk/theatre/nacionalnaa-opera-18.h
 export TRACK_PATH=".block-info__title span[itemprop=name]"
 ```
 
+**Example — Dynamo Kyiv tickets (exclude archived events):**
+
+Archived listings use `card--archive` on the outer card; upcoming events use the same inner markup without that modifier.
+
+```html
+<div class="card card--long">
+  <div class="card--content"><a href="...">Upcoming match</a></div>
+</div>
+<div class="card card--long card--archive">
+  <div class="card--content"><a href="...">Past match</a></div>
+</div>
+```
+
+```bash
+export TARGET_ENDPOINT="https://fc-dynamo-kyiv.ticketsbox.com/"
+export TRACK_PATH=".card:not(.card--archive) .card--content a"
+```
+
 Use your browser's DevTools (Inspect Element) to find the right CSS selector for any page.
 
 ## REQUEST_HEADERS format
