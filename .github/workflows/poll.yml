@@ -1,46 +1,62 @@
 name: Poll endpoint
 
+# Off-minute on purpose: top-of-six schedules are GitHub's busiest slot
+# and get delayed or dropped.
 on:
-  # schedule:
-  #   - cron: '0 */4 * * *'
+#  schedule:
+#    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Manual and scheduled runs must not overlap, otherwise both commit
+# last_response.json and one push is rejected.
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
 jobs:
   poll:
     runs-on: ubuntu-latest
+    # A normal run takes seconds (~30s with PAGE_MAX=30); default is 6 hours.
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Hash source files
-        id: hash
-        run: echo "go_hash=${{ hashFiles('main.go', 'go.mod', 'go.sum') }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
 
       - name: Restore cached binary
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: poller
-          key: poller-${{ steps.hash.outputs.go_hash }}
+          key: poller-${{ hashFiles('main.go', 'go.mod', 'go.sum') }}
 
-      - name: Build (only if source changed)
+      - name: Set up Go (only if source changed)
         if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          # Single source of truth for the Go version.
+          go-version-file: go.mod
 
       - name: Compile binary
         if: steps.cache.outputs.cache-hit != 'true'
-        run: go build -o poller main.go
+        env:
+          CGO_ENABLED: '0'
+        run: go build -ldflags="-s -w" -o poller main.go
 
       - name: Run poller
         env:
-          TARGET_ENDPOINT: ${{ secrets.TARGET_ENDPOINT }}
+          # Non-sensitive config lives in repository variables (vars), not
+          # secrets: values stay visible/editable in the UI and are not masked
+          # as *** in logs, which makes debugging selectors possible.
+          TARGET_ENDPOINT: ${{ vars.TARGET_ENDPOINT }}
+          TRACK_PATH: ${{ vars.TRACK_PATH }}
+          PAGE_MAX: ${{ vars.PAGE_MAX }}
+          PAGE_PARAM: ${{ vars.PAGE_PARAM }}
+          PAGE_ITEM_PATH: ${{ vars.PAGE_ITEM_PATH }}
+          # Credentials stay in secrets. REQUEST_HEADERS may carry auth headers.
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TRACK_PATH: ${{ secrets.TRACK_PATH }}
           REQUEST_HEADERS: ${{ secrets.REQUEST_HEADERS }}
         run: ./poller
 
@@ -49,4 +65,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last_response.json
-          git diff --cached --quiet || git commit -m "update last_response.json" && git push
+          # Rebase first: main may have moved since checkout, and a rejected
+          # push would lose the new state.
+          git diff --cached --quiet || {
+            git commit -m "update last_response.json"
+            git pull --rebase
+            git push
+          }

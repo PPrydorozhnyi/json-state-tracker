@@ -14,7 +14,7 @@ Works anywhere: run it locally with cron, launchd, Task Scheduler, or any other 
 
 ## Configuration
 
-All configuration is done via environment variables. When running on GitHub Actions, set these as **repository secrets** (Settings > Secrets and variables > Actions).
+All configuration is done via environment variables. When running on GitHub Actions (Settings > Secrets and variables > Actions), credentials go to **secrets** (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `REQUEST_HEADERS`) and everything else to **variables** (`TARGET_ENDPOINT`, `TRACK_PATH`, `PAGE_MAX`, `PAGE_PARAM`, `PAGE_ITEM_PATH`). Variables stay readable in the UI and are not masked in logs, which helps debugging selectors.
 
 ### Required
 
@@ -30,6 +30,9 @@ All configuration is done via environment variables. When running on GitHub Acti
 | Variable | Description |
 |---|---|
 | `REQUEST_HEADERS` | JSON object of HTTP headers to include in the request (see below) |
+| `PAGE_MAX` | Enables pagination when set to an integer `>= 1`; max number of pages to fetch (see [Pagination](#pagination)) |
+| `PAGE_PARAM` | Page query parameter name. Default `page` |
+| `PAGE_ITEM_PATH` | Unfiltered path matching all items on a page, used only to detect the last page. Default `TRACK_PATH` |
 
 ## TRACK_PATH examples (JSON)
 
@@ -108,6 +111,17 @@ export TARGET_ENDPOINT="https://kontramarka.ua/uk/theatre/nacionalnaa-opera-18.h
 export TRACK_PATH=".block-info__title span[itemprop=name]"
 ```
 
+**Example — only concerts in December on kontramarka.ua (case-insensitive text filter):**
+
+Use the `:matches(regex)` pseudo-class to keep only elements whose text matches a regular expression. `(?i)` makes it case-insensitive, and since the regex is unanchored, any text before or after the word is allowed — so `(?i)концерт` matches "Новорічний концерт", "КОНЦЕРТ до дня Святого Миколая", "Гала-концерт", "Концерту" etc.
+
+```bash
+export TARGET_ENDPOINT='https://kontramarka.ua/uk/theatre/nacionalnaa-opera-18.html?page=0&date=01.12.2026%2C31.12.2026&genre='
+export TRACK_PATH='.block-info__title span[itemprop=name]:matches((?i)концерт)'
+```
+
+Use `:containsOwn("text")` / `:contains("text")` for a plain case-sensitive substring match instead of a regex. Wrap values containing `&` or `(` in single quotes.
+
 **Example — Dynamo Kyiv tickets (exclude archived events):**
 
 Archived listings use `card--archive` on the outer card; upcoming events use the same inner markup without that modifier.
@@ -127,6 +141,58 @@ export TRACK_PATH=".card:not(.card--archive) .card--content a"
 ```
 
 Use your browser's DevTools (Inspect Element) to find the right CSS selector for any page.
+
+## Pagination
+
+Set `PAGE_MAX` to scan a paginated listing page by page. The tool requests `page=0`, `page=1`, ... (the `PAGE_PARAM` query parameter is overwritten if present in `TARGET_ENDPOINT`, added otherwise) and merges `TRACK_PATH` matches from all pages into one set.
+
+Pagination stops when any of these happens:
+
+- the page has no `PAGE_ITEM_PATH` items (past the last page)
+- the page has exactly the same items as the previous one (site repeats the last page for out-of-range numbers)
+- the request fails (on page 0 this is a fatal error)
+- `PAGE_MAX` pages have been fetched
+
+A page with zero `TRACK_PATH` matches does **not** stop pagination. That is why `PAGE_ITEM_PATH` exists: when `TRACK_PATH` filters items (e.g. with `:matches(...)`), set `PAGE_ITEM_PATH` to the same selector without the filter.
+
+**Example — December concerts on opera.com.ua across all pages:**
+
+```bash
+export TARGET_ENDPOINT='https://opera.com.ua/afisha?month=01-12-2026'
+export TRACK_PATH='.right_part .title a:matches((?i)концерт)'
+export PAGE_ITEM_PATH='.right_part .title a'
+export PAGE_MAX=20
+```
+
+**Example — December concerts on opera.com.ua that have tickets on sale:**
+
+Each event block has a `.bay` div with a "Придбати квиток" link when tickets are available:
+
+```html
+<div class="right_part">
+  <div class="title"><a href="/afisha/karmen-76">Кармен</a></div>
+  <div class="bay"><a href="https://widget.mticket.com.ua/...">Придбати квиток</a></div>
+</div>
+```
+
+Add `:has(...)` to the concert filter, so a title is kept only when its name matches **and** its block contains that link:
+
+```bash
+export TARGET_ENDPOINT='https://opera.com.ua/afisha?month=01-12-2026'
+export TRACK_PATH='.right_part:has(.bay a:containsOwn("Придбати квиток")) .title a:matches((?i)концерт)'
+export PAGE_ITEM_PATH='.right_part .title a'
+export PAGE_MAX=20
+```
+
+Use `.right_part:has(.bay a)` instead if any link inside `.bay` is enough, regardless of its text.
+
+**Example — all concerts on kontramarka.ua:**
+
+```bash
+export TARGET_ENDPOINT='https://kontramarka.ua/uk/concert?date=&genre='
+export TRACK_PATH='.block-info__title span[itemprop=name]'
+export PAGE_MAX=30
+```
 
 ## REQUEST_HEADERS format
 
@@ -186,8 +252,8 @@ This repo includes a workflow at `.github/workflows/poll.yml` that runs on a sch
 
 1. Fork this repository
 2. Go to **Settings > Secrets and variables > Actions**
-3. Add the required secrets: `TARGET_ENDPOINT`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TRACK_PATH`
-4. Optionally add `REQUEST_HEADERS`
+3. **Secrets** tab: add `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optionally `REQUEST_HEADERS`
+4. **Variables** tab: add `TARGET_ENDPOINT`, `TRACK_PATH`, optionally `PAGE_MAX`, `PAGE_PARAM`, `PAGE_ITEM_PATH`
 5. The workflow will start running on schedule automatically
 
 ### Adjust the schedule
@@ -197,8 +263,10 @@ Edit `.github/workflows/poll.yml` and change the cron expression:
 ```yaml
 on:
   schedule:
-    - cron: '0 */3 * * *'  # every 3 hours
+    - cron: '17 */4 * * *'  # every 4 hours, at minute 17
 ```
+
+Prefer an off-minute (like `17`) over `0`: top-of-hour schedules are GitHub's busiest slot and get delayed or dropped.
 
 Common schedules:
 
