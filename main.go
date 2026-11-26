@@ -23,8 +23,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// pageDelay is a var only so tests can disable it.
+var pageDelay = 500 * time.Millisecond
+
 const (
-	pageDelay         = 500 * time.Millisecond
 	maxMessageRunes   = 4000
 	maxErrorBodyRunes = 200
 	fieldSeparator    = " | "

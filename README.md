@@ -282,9 +282,19 @@ export TELEGRAM_BOT_TOKEN="123456:ABC..."
 export TELEGRAM_CHAT_ID="-100123456789"
 export TRACK_PATH="events.#.event_date"
 
-go build -o poller main.go
+go build -o poller .
 ./poller
 ```
+
+### Run tests
+
+```bash
+go test .
+```
+
+Unit tests cover config parsing, extraction (HTML selectors, `TRACK_FIELDS`, gjson paths), the state file, and pagination against a local `httptest` server — no network needed.
+
+`cmd/approve` and `cmd/notifications` are separate helper scripts, run with `go run ./cmd/approve` / `go run ./cmd/notifications`.
 
 ### Schedule with cron (Linux/macOS)
 

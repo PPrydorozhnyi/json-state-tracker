@@ -29,7 +29,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: poller
-          key: poller-${{ hashFiles('main.go', 'go.mod', 'go.sum') }}
+          # main_test.go included so a test-only change still runs the tests.
+          key: poller-${{ hashFiles('main.go', 'main_test.go', 'go.mod', 'go.sum') }}
 
       - name: Set up Go (only if source changed)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -38,11 +39,15 @@ jobs:
           # Single source of truth for the Go version.
           go-version-file: go.mod
 
+      - name: Vet and test
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: go vet . && go test .
+
       - name: Compile binary
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           CGO_ENABLED: '0'
-        run: go build -ldflags="-s -w" -o poller main.go
+        run: go build -ldflags="-s -w" -o poller .
 
       - name: Run poller
         env:
