@@ -296,7 +296,7 @@ func TestLoadSetErrors(t *testing.T) {
 	}
 
 	corrupt := filepath.Join(dir, "corrupt.json")
-	if err := os.WriteFile(corrupt, []byte("not json"), 0o644); err != nil {
+	if err = os.WriteFile(corrupt, []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err = loadSet(corrupt)
@@ -502,7 +502,7 @@ func TestExecuteFetchSendsHeaders(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	body, contentType, err := executeFetch(srv.URL, map[string]string{"User-Agent": "test-agent"})
+	body, contentType, err := executeFetch(t.Context(), srv.URL, map[string]string{"User-Agent": "test-agent"})
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -521,7 +521,7 @@ func TestExecuteFetchTruncatesErrorBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := executeFetch(srv.URL, nil)
+	_, _, err := executeFetch(t.Context(), srv.URL, nil)
 	if err == nil {
 		t.Fatal("expected error for HTTP 500")
 	}
@@ -545,7 +545,7 @@ func TestFetchDocumentDetectsFormat(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	htmlDoc, err := fetchDocument(srv.URL+"/html", nil)
+	htmlDoc, err := fetchDocument(t.Context(), srv.URL+"/html", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +553,7 @@ func TestFetchDocumentDetectsFormat(t *testing.T) {
 		t.Errorf("html: got %q", got)
 	}
 
-	jsonDoc, err := fetchDocument(srv.URL+"/json", nil)
+	jsonDoc, err := fetchDocument(t.Context(), srv.URL+"/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +676,7 @@ func TestFetchAllPages(t *testing.T) {
 				return operaPage(tt.pages[page]...), true
 			})
 
-			got, isPartial, err := fetchAllPages(srv.URL+"/afisha?month=01-12-2026", nil, tt.trackPath, nil, titlePath, "page", tt.maxPages)
+			got, isPartial, err := fetchAllPages(t.Context(), srv.URL+"/afisha?month=01-12-2026", nil, tt.trackPath, nil, titlePath, "page", tt.maxPages)
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
@@ -707,6 +707,7 @@ func TestFetchAllPagesWithFields(t *testing.T) {
 	})
 
 	got, isPartial, err := fetchAllPages(
+		t.Context(),
 		srv.URL,
 		nil,
 		".item:has(.bay a):has(.title a:matches((?i)концерт))",
@@ -735,7 +736,7 @@ func TestFetchSet(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	got, err := fetchSet(srv.URL, nil, titlePath, nil)
+	got, err := fetchSet(t.Context(), srv.URL, nil, titlePath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
