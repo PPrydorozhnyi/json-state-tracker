@@ -51,6 +51,7 @@ jobs:
           # as *** in logs, which makes debugging selectors possible.
           TARGET_ENDPOINT: ${{ vars.TARGET_ENDPOINT }}
           TRACK_PATH: ${{ vars.TRACK_PATH }}
+          TRACK_FIELDS: ${{ vars.TRACK_FIELDS }}
           PAGE_MAX: ${{ vars.PAGE_MAX }}
           PAGE_PARAM: ${{ vars.PAGE_PARAM }}
           PAGE_ITEM_PATH: ${{ vars.PAGE_ITEM_PATH }}

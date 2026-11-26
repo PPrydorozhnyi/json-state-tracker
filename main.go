@@ -27,6 +27,7 @@ const (
 	pageDelay         = 500 * time.Millisecond
 	maxMessageRunes   = 4000
 	maxErrorBodyRunes = 200
+	fieldSeparator    = " | "
 )
 
 // httpClient is shared so paginated requests reuse keep-alive connections.
@@ -59,14 +60,19 @@ func main() {
 		fatal("bad pagination config", err)
 	}
 
+	fields, err := parseTrackFields(os.Getenv("TRACK_FIELDS"))
+	if err != nil {
+		fatal("bad track fields config", err)
+	}
+
 	var newSet map[string]bool
 	isPartial := false
 	if isPaginated {
 		pageParam := cmp.Or(os.Getenv("PAGE_PARAM"), "page")
 		itemPath := cmp.Or(os.Getenv("PAGE_ITEM_PATH"), trackPath)
-		newSet, isPartial, err = fetchAllPages(endpoint, headers, trackPath, itemPath, pageParam, maxPages)
+		newSet, isPartial, err = fetchAllPages(endpoint, headers, trackPath, fields, itemPath, pageParam, maxPages)
 	} else {
-		newSet, err = fetchSet(endpoint, headers, trackPath)
+		newSet, err = fetchSet(endpoint, headers, trackPath, fields)
 	}
 	if err != nil {
 		fatal("fetch failed", err)
@@ -104,12 +110,12 @@ func main() {
 	}
 }
 
-func fetchSet(endpoint string, headers map[string]string, trackPath string) (map[string]bool, error) {
+func fetchSet(endpoint string, headers map[string]string, trackPath string, fields []string) (map[string]bool, error) {
 	doc, err := fetchDocument(endpoint, headers)
 	if err != nil {
 		return nil, err
 	}
-	return toSet(doc.extract(trackPath)), nil
+	return toSet(doc.extract(trackPath, fields)), nil
 }
 
 // fetchAllPages walks pages 0..maxPages-1 sequentially and merges TRACK_PATH
@@ -119,7 +125,7 @@ func fetchSet(endpoint string, headers map[string]string, trackPath string) (map
 //
 // isPartial is true when a page after the first one failed to fetch, so the
 // merged set is missing values from the remaining pages.
-func fetchAllPages(endpoint string, headers map[string]string, trackPath, itemPath, pageParam string, maxPages int) (merged map[string]bool, isPartial bool, err error) {
+func fetchAllPages(endpoint string, headers map[string]string, trackPath string, fields []string, itemPath, pageParam string, maxPages int) (merged map[string]bool, isPartial bool, err error) {
 	merged = map[string]bool{}
 	var prevItems []string
 
@@ -141,7 +147,7 @@ func fetchAllPages(endpoint string, headers map[string]string, trackPath, itemPa
 			return merged, true, nil
 		}
 
-		items := doc.extract(itemPath)
+		items := doc.extract(itemPath, nil)
 		if len(items) == 0 {
 			log.Printf("page %d: no items, end of pagination", page)
 			break
@@ -154,8 +160,8 @@ func fetchAllPages(endpoint string, headers map[string]string, trackPath, itemPa
 		prevItems = items
 
 		matches := items
-		if trackPath != itemPath {
-			matches = doc.extract(trackPath)
+		if trackPath != itemPath || len(fields) > 0 {
+			matches = doc.extract(trackPath, fields)
 		}
 		log.Printf("page %d: %d items, %d matches", page, len(items), len(matches))
 		for _, v := range matches {
@@ -193,6 +199,19 @@ func parsePageMax(raw string) (maxPages int, isEnabled bool, err error) {
 	return maxPages, true, nil
 }
 
+// parseTrackFields reads TRACK_FIELDS as a JSON array of selectors. JSON is
+// used instead of a comma list because commas are valid CSS selector syntax.
+func parseTrackFields(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var fields []string
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return nil, fmt.Errorf("invalid TRACK_FIELDS JSON array: %w", err)
+	}
+	return fields, nil
+}
+
 // document is a fetched response parsed once, so several paths can be
 // extracted from it without re-parsing.
 type document struct {
@@ -215,9 +234,11 @@ func fetchDocument(endpoint string, headers map[string]string) (*document, error
 	return &document{html: html}, nil
 }
 
-func (d *document) extract(path string) []string {
+// extract returns values for path. fields apply to HTML only; JSON builds
+// composite values with gjson multipaths instead.
+func (d *document) extract(path string, fields []string) []string {
 	if d.html != nil {
-		return extractHTML(d.html, path)
+		return extractHTML(d.html, path, fields)
 	}
 	return extractJSON(d.json, path)
 }
@@ -248,23 +269,55 @@ func extractJSON(data []byte, path string) []string {
 //	".title a"                     → text content of each matched element
 //	"div[class*=showDate-]@class"  → class attribute of each matched element
 //
+// When fields are given, each matched element becomes one composite record
+// built from those sub-selectors (see composeRecord).
+//
 // Empty values are silently skipped.
-func extractHTML(doc *goquery.Document, path string) []string {
+func extractHTML(doc *goquery.Document, path string, fields []string) []string {
 	selector, attr := parseHTMLPath(path)
 
 	var values []string
 	doc.Find(selector).Each(func(_ int, s *goquery.Selection) {
 		var val string
-		if attr != "" {
-			val, _ = s.Attr(attr)
+		if len(fields) > 0 {
+			val = composeRecord(s, fields)
 		} else {
-			val = s.Text()
+			val = selectionValue(s, attr)
 		}
-		if val = strings.TrimSpace(val); val != "" {
+		if val != "" {
 			values = append(values, val)
 		}
 	})
 	return values
+}
+
+// composeRecord evaluates each field selector relative to container and joins
+// the non-empty results with fieldSeparator. A field matching several
+// elements contributes all of their values, space-separated.
+func composeRecord(container *goquery.Selection, fields []string) string {
+	var parts []string
+	for _, field := range fields {
+		selector, attr := parseHTMLPath(field)
+		var fieldValues []string
+		container.Find(selector).Each(func(_ int, s *goquery.Selection) {
+			if val := selectionValue(s, attr); val != "" {
+				fieldValues = append(fieldValues, val)
+			}
+		})
+		if len(fieldValues) > 0 {
+			parts = append(parts, strings.Join(fieldValues, " "))
+		}
+	}
+	return strings.Join(parts, fieldSeparator)
+}
+
+// selectionValue returns the trimmed attribute value, or text when attr is empty.
+func selectionValue(s *goquery.Selection, attr string) string {
+	if attr == "" {
+		return strings.TrimSpace(s.Text())
+	}
+	val, _ := s.Attr(attr)
+	return strings.TrimSpace(val)
 }
 
 // parseHTMLPath splits a TRACK_PATH like "div.foo@class" into the CSS

@@ -14,7 +14,7 @@ Works anywhere: run it locally with cron, launchd, Task Scheduler, or any other 
 
 ## Configuration
 
-All configuration is done via environment variables. When running on GitHub Actions (Settings > Secrets and variables > Actions), credentials go to **secrets** (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `REQUEST_HEADERS`) and everything else to **variables** (`TARGET_ENDPOINT`, `TRACK_PATH`, `PAGE_MAX`, `PAGE_PARAM`, `PAGE_ITEM_PATH`). Variables stay readable in the UI and are not masked in logs, which helps debugging selectors.
+All configuration is done via environment variables. When running on GitHub Actions (Settings > Secrets and variables > Actions), credentials go to **secrets** (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `REQUEST_HEADERS`) and everything else to **variables** (`TARGET_ENDPOINT`, `TRACK_PATH`, `TRACK_FIELDS`, `PAGE_MAX`, `PAGE_PARAM`, `PAGE_ITEM_PATH`). Variables stay readable in the UI and are not masked in logs, which helps debugging selectors.
 
 ### Required
 
@@ -33,6 +33,7 @@ All configuration is done via environment variables. When running on GitHub Acti
 | `PAGE_MAX` | Enables pagination when set to an integer `>= 1`; max number of pages to fetch (see [Pagination](#pagination)) |
 | `PAGE_PARAM` | Page query parameter name. Default `page` |
 | `PAGE_ITEM_PATH` | Unfiltered path matching all items on a page, used only to detect the last page. Default `TRACK_PATH` |
+| `TRACK_FIELDS` | HTML only. JSON array of selectors evaluated inside each `TRACK_PATH` match; their values are joined into one record (see [Composite records](#composite-records)) |
 
 ## TRACK_PATH examples (JSON)
 
@@ -194,6 +195,69 @@ export TRACK_PATH='.block-info__title span[itemprop=name]'
 export PAGE_MAX=30
 ```
 
+## Composite records
+
+By default each `TRACK_PATH` match gives one value (e.g. an event title). The same show on two dates then collapses into a single record, and a new date is never reported. Build each record from several elements instead.
+
+### HTML: `TRACK_FIELDS`
+
+Point `TRACK_PATH` at the whole item (e.g. the event card) and list the parts to combine in `TRACK_FIELDS` — a JSON array of selectors evaluated **inside each match**. Non-empty values are joined with ` | `.
+
+- Each field supports the `@attr` suffix.
+- A field matching several elements contributes all of them, space-separated.
+- A field with no match is skipped; an item with no field values is skipped.
+- Filter on the container with `:has(...)`, since `TRACK_PATH` now selects the card, not the title.
+
+**Example — opera.com.ua concerts with tickets on sale, one record per performance:**
+
+```html
+<div class="item">
+  <div class="left_part">
+    <div class="date">19/12</div>
+    <div class="row row_date">Початок: <b>15:00</b><br />Завершення: <b>17:30</b></div>
+  </div>
+  <div class="right_part">
+    <div class="title"><a href="...">Новорічно-Різдвяний концерт</a></div>
+    <div class="bay"><a href="...">Придбати квиток</a></div>
+  </div>
+</div>
+```
+
+```bash
+export TARGET_ENDPOINT='https://opera.com.ua/afisha?month=01-12-2026'
+export TRACK_PATH='.item:has(.bay a):has(.title a:matches((?i)концерт))'
+export TRACK_FIELDS='[".date", ".row_date b:first-of-type", ".title a"]'
+export PAGE_ITEM_PATH='.right_part .title a'
+export PAGE_MAX=20
+# extracts:
+#   "06/12 | 15:00 | Концерт до Дня Святого Миколая"
+#   "19/12 | 15:00 | Новорічно-Різдвяний концерт"
+#   "20/12 | 17:00 | Новорічно-Різдвяний концерт"
+```
+
+The start time is included because the same date can repeat too (e.g. two performances on one day).
+
+### JSON: gjson multipaths
+
+No extra setting needed — a gjson [multipath](https://github.com/tidwall/gjson/blob/master/SYNTAX.md#multipaths) builds a composite value per array element.
+
+```json
+{
+  "events": [
+    { "id": 1, "event_date": "2026-12-19", "title": "New Year Gala" },
+    { "id": 2, "event_date": "2026-12-20", "title": "New Year Gala" }
+  ]
+}
+```
+
+| TRACK_PATH | Extracted values |
+|---|---|
+| `events.#.title` | `New Year Gala` (one record, duplicates collapse) |
+| `events.#.{event_date,title}` | `{"event_date":"2026-12-19","title":"New Year Gala"}`, `{"event_date":"2026-12-20","title":"New Year Gala"}` |
+| `events.#.{date:event_date,name:title}` | `{"date":"2026-12-19","name":"New Year Gala"}`, `{"date":"2026-12-20","name":"New Year Gala"}` |
+
+**Note:** switching an existing tracker to composite records changes the value format, so the first run reports every old value as removed and every new one as added. Delete `last_response.json` first to avoid that one noisy message.
+
 ## REQUEST_HEADERS format
 
 A JSON object where keys are header names and values are header values:
@@ -253,7 +317,7 @@ This repo includes a workflow at `.github/workflows/poll.yml` that runs on a sch
 1. Fork this repository
 2. Go to **Settings > Secrets and variables > Actions**
 3. **Secrets** tab: add `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optionally `REQUEST_HEADERS`
-4. **Variables** tab: add `TARGET_ENDPOINT`, `TRACK_PATH`, optionally `PAGE_MAX`, `PAGE_PARAM`, `PAGE_ITEM_PATH`
+4. **Variables** tab: add `TARGET_ENDPOINT`, `TRACK_PATH`, optionally `TRACK_FIELDS`, `PAGE_MAX`, `PAGE_PARAM`, `PAGE_ITEM_PATH`
 5. The workflow will start running on schedule automatically
 
 ### Adjust the schedule
