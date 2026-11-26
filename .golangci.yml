@@ -1,0 +1,64 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    # correctness
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - errorlint
+    - nilerr
+    - bodyclose
+    # efficiency
+    - prealloc
+    - perfsprint
+    - unconvert
+    - gocritic
+    # style / modern Go
+    - revive
+    - misspell
+    - usestdlibvars
+    - modernize
+    - intrange
+    - copyloopvar
+    # security / robustness
+    - gosec
+    - noctx
+  settings:
+    govet:
+      # Includes fieldalignment (struct padding) and shadow.
+      enable-all: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+    gosec:
+      excludes:
+        # Log-injection taint rule flags plain ints in log calls (false positive).
+        - G706
+  exclusions:
+    paths:
+      # Helper scripts with hard-coded tokens, out of scope for the poller.
+      - cmd/
+    rules:
+      # Test table structs and temp-file IO: padding/gosec/prealloc findings are noise.
+      - path: _test\.go
+        linters:
+          - gosec
+          - prealloc
+      - path: _test\.go
+        linters:
+          - govet
+        text: "fieldalignment"
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports

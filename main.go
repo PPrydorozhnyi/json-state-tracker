@@ -1,8 +1,11 @@
+// Command state-tracker polls a JSON API or HTML page, extracts tracked values
+// and sends a Telegram notification when the set of values changes.
 package main
 
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,9 +16,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -36,6 +42,10 @@ const (
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 func main() {
+	// Cancelled on Ctrl+C / SIGTERM so in-flight requests abort promptly.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	endpoint := mustEnv("TARGET_ENDPOINT")
 	tkn := mustEnv("TELEGRAM_BOT_TOKEN")
 	chatID := mustEnv("TELEGRAM_CHAT_ID")
@@ -43,13 +53,14 @@ func main() {
 	stateFile := "last_response.json"
 
 	notify := func(msg string) {
-		if err := sendTelegram(tkn, chatID, msg); err != nil {
+		if err := sendTelegram(ctx, tkn, chatID, msg); err != nil {
 			log.Printf("telegram notify failed: %v", err)
 		}
 	}
-	fatal := func(context string, err error) {
-		notify(fmt.Sprintf("%s: %v", context, err))
-		log.Fatalf("%s: %v", context, err)
+	fatal := func(what string, err error) {
+		notify(fmt.Sprintf("%s: %v", what, err))
+		stop()
+		log.Fatalf("%s: %v", what, err)
 	}
 
 	headers, err := parseHeaders(os.Getenv("REQUEST_HEADERS"))
@@ -72,9 +83,9 @@ func main() {
 	if isPaginated {
 		pageParam := cmp.Or(os.Getenv("PAGE_PARAM"), "page")
 		itemPath := cmp.Or(os.Getenv("PAGE_ITEM_PATH"), trackPath)
-		newSet, isPartial, err = fetchAllPages(endpoint, headers, trackPath, fields, itemPath, pageParam, maxPages)
+		newSet, isPartial, err = fetchAllPages(ctx, endpoint, headers, trackPath, fields, itemPath, pageParam, maxPages)
 	} else {
-		newSet, err = fetchSet(endpoint, headers, trackPath, fields)
+		newSet, err = fetchSet(ctx, endpoint, headers, trackPath, fields)
 	}
 	if err != nil {
 		fatal("fetch failed", err)
@@ -91,12 +102,13 @@ func main() {
 	}
 
 	oldSet, err := loadSet(stateFile)
-	if errors.Is(err, fs.ErrNotExist) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		log.Println("First run, saving baseline.")
 		notify("First run, saving baseline.")
-	} else if err != nil {
+	case err != nil:
 		fatal("load state failed", err)
-	} else {
+	default:
 		added, removed := diffSets(oldSet, newSet)
 		if len(added) > 0 || len(removed) > 0 {
 			msg := formatChanges(endpoint, added, removed)
@@ -108,12 +120,12 @@ func main() {
 	}
 
 	if err := saveSet(stateFile, newSet); err != nil {
-		log.Fatalf("save state: %v", err)
+		fatal("save state failed", err)
 	}
 }
 
-func fetchSet(endpoint string, headers map[string]string, trackPath string, fields []string) (map[string]bool, error) {
-	doc, err := fetchDocument(endpoint, headers)
+func fetchSet(ctx context.Context, endpoint string, headers map[string]string, trackPath string, fields []string) (map[string]bool, error) {
+	doc, err := fetchDocument(ctx, endpoint, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +139,7 @@ func fetchSet(endpoint string, headers map[string]string, trackPath string, fiel
 //
 // isPartial is true when a page after the first one failed to fetch, so the
 // merged set is missing values from the remaining pages.
-func fetchAllPages(endpoint string, headers map[string]string, trackPath string, fields []string, itemPath, pageParam string, maxPages int) (merged map[string]bool, isPartial bool, err error) {
+func fetchAllPages(ctx context.Context, endpoint string, headers map[string]string, trackPath string, fields []string, itemPath, pageParam string, maxPages int) (merged map[string]bool, isPartial bool, err error) {
 	merged = map[string]bool{}
 	var prevItems []string
 
@@ -140,7 +152,7 @@ func fetchAllPages(endpoint string, headers map[string]string, trackPath string,
 			return nil, false, err
 		}
 
-		doc, err := fetchDocument(pageURL, headers)
+		doc, err := fetchDocument(ctx, pageURL, headers)
 		if err != nil {
 			if page == 0 {
 				return nil, false, err
@@ -221,8 +233,8 @@ type document struct {
 	json []byte
 }
 
-func fetchDocument(endpoint string, headers map[string]string) (*document, error) {
-	body, contentType, err := executeFetch(endpoint, headers)
+func fetchDocument(ctx context.Context, endpoint string, headers map[string]string) (*document, error) {
+	body, contentType, err := executeFetch(ctx, endpoint, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -255,8 +267,9 @@ func toSet(values []string) map[string]bool {
 
 func extractJSON(data []byte, path string) []string {
 	result := gjson.GetBytes(data, path)
-	var values []string
-	for _, v := range result.Array() {
+	arr := result.Array()
+	values := make([]string, 0, len(arr))
+	for _, v := range arr {
 		values = append(values, v.String())
 	}
 	return values
@@ -342,7 +355,7 @@ func detectFormat(contentType string) string {
 }
 
 func loadSet(path string) (map[string]bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +376,7 @@ func saveSet(path string, set map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0o600) //nolint:gosec // G703: path is the constant state file name
 }
 
 func diffSets(oldSet, newSet map[string]bool) (added, removed []string) {
@@ -434,8 +447,8 @@ func parseHeaders(raw string) (map[string]string, error) {
 	return headers, nil
 }
 
-func executeFetch(endpoint string, headers map[string]string) (body []byte, contentType string, err error) {
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+func executeFetch(ctx context.Context, endpoint string, headers map[string]string) (body []byte, contentType string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return nil, "", fmt.Errorf("build request: %w", err)
 	}
@@ -448,7 +461,7 @@ func executeFetch(endpoint string, headers map[string]string) (body []byte, cont
 	if err != nil {
 		return nil, "", fmt.Errorf("request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err = io.ReadAll(resp.Body)
 	if err != nil {
@@ -460,16 +473,23 @@ func executeFetch(endpoint string, headers map[string]string) (body []byte, cont
 	return body, resp.Header.Get("Content-Type"), nil
 }
 
-func sendTelegram(tkn, chatID, message string) error {
+func sendTelegram(ctx context.Context, tkn, chatID, message string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tkn)
-	resp, err := httpClient.PostForm(apiURL, url.Values{
+	form := url.Values{
 		"chat_id": {chatID},
 		"text":    {message},
-	})
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("build telegram request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)

@@ -296,6 +296,16 @@ Unit tests cover config parsing, extraction (HTML selectors, `TRACK_FIELDS`, gjs
 
 `cmd/approve` and `cmd/notifications` are separate helper scripts, run with `go run ./cmd/approve` / `go run ./cmd/notifications`.
 
+### Linting
+
+Static analysis uses [golangci-lint](https://golangci-lint.run/) v2 (config in `.golangci.yml`): correctness (`govet`
+incl. `fieldalignment` struct padding and `shadow`, `staticcheck`, `errcheck`), efficiency (`prealloc`, `perfsprint`, `gocritic`), style/modern Go (`revive`, `modernize`, `intrange`), security (`gosec`, `noctx`) and formatters (`gofumpt`, `goimports`).
+
+```bash
+golangci-lint run      # lint
+golangci-lint fmt      # auto-format
+```
+
 ### Schedule with cron (Linux/macOS)
 
 ```bash
